@@ -16,7 +16,7 @@ class SimpleAutoCalibrator:
     def __init__(self):
         """Initialize calibration parameters and default values."""
         # Physical system parameters
-        self.BEAM_LENGTH_M = 0.215  # Known beam length in meters
+        self.SIDE_LENGTH_M = math.sqrt(3)/2 * 0.3  # stewart platform plate - 300mm diameter
         
         # Camera configuration
         self.CAM_INDEX = 0  # Default camera index
@@ -31,18 +31,22 @@ class SimpleAutoCalibrator:
         self.lower_hsv = None  # Lower HSV bound for ball detection
         self.upper_hsv = None  # Upper HSV bound for ball detection
         
-        # Geometry calibration data
-        self.peg_points = []  # Beam endpoint pixel coordinates
-        self.pixel_to_meter_ratio = None  # Conversion ratio from pixels to meters
-        
+        # Geometry calibration data - change to 3 point on plate 
+        self.peg_points = []  # endpoint pixel coordinates [(x1,y1), (x2,y2), (x3,y3)]
+        self.plate_center = None # centerpoint (cx, cy)
+        self.pixel_to_meter_ratio = None # average (np.mean)
+        self.pixel_to_meter_ratio_l1 = None  # Conversion ratio from pixels to meters
+        self.pixel_to_meter_ratio_l2 = None 
+        self.pixel_to_meter_ratio_l3 = None 
+
         # Servo hardware configuration
         self.servo = None  # Serial connection to servo
         self.servo_port = "/dev/cu.usbmodem1401"  # Servo communication port
-        self.neutral_angle = 15  # Servo neutral position angle
+        self.neutral_angle = [15, 15, 15]  # Servo neutral position angle for each motor
         
         # Position limit results
-        self.position_min = None  # Minimum ball position in meters
-        self.position_max = None  # Maximum ball position in meters
+        self.position_min = [None, None]  # Minimum ball position in meters for each motor [xmin, ymin]
+        self.position_max = [None, None]  # Maximum ball position in meters for each motor [xmax, ymax]
 
     def connect_servo(self):
         """Establish serial connection to servo motor for automated limit finding.
@@ -83,11 +87,11 @@ class SimpleAutoCalibrator:
             if self.phase == "color":
                 # Color sampling phase - collect HSV samples at click point
                 self.sample_color(x, y)
-            elif self.phase == "geometry" and len(self.peg_points) < 2:
+            elif self.phase == "geometry" and len(self.peg_points) < 3: # changed to adapt to 3 points
                 # Geometry phase - collect beam endpoint coordinates
                 self.peg_points.append((x, y))
                 print(f"[GEO] Peg {len(self.peg_points)} selected")
-                if len(self.peg_points) == 2:
+                if len(self.peg_points) == 3:
                     self.calculate_geometry()
 
     def sample_color(self, x, y):
@@ -137,14 +141,23 @@ class SimpleAutoCalibrator:
 
     def calculate_geometry(self):
         """Calculate pixel-to-meter conversion ratio from beam endpoint coordinates."""
-        p1, p2 = self.peg_points
+        p1, p2, p3 = self.peg_points
         
         # Calculate pixel distance between beam endpoints
-        pixel_distance = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+        #pixel_distance = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2) - from BB
+        l3 = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+        l2 = math.sqrt((p3[0] - p1[0])**2 + (p3[1] - p1[1])**2)
+        l1 = math.sqrt((p3[0] - p2[0])**2 + (p3[1] - p2[1])**2)
         
         # Convert to meters using known beam length
-        self.pixel_to_meter_ratio = self.BEAM_LENGTH_M / pixel_distance
-        print(f"[GEO] Pixel-to-meter ratio: {self.pixel_to_meter_ratio:.6f}")
+        self.pixel_to_meter_ratio_l1 = self.SIDE_LENGTH_M / l1
+        self.pixel_to_meter_ratio_l2 = self.SIDE_LENGTH_M / l2
+        self.pixel_to_meter_ratio_l3 = self.SIDE_LENGTH_M / l3
+
+        print(f"[GEO] Pixel-to-meter ratios: "
+            f"L1={self.pixel_to_meter_ratio_l1:.6f}, "
+            f"L2={self.pixel_to_meter_ratio_l2:.6f}, "
+            f"L3={self.pixel_to_meter_ratio_l3:.6f}")
         
         # Advance to limits calibration phase
         self.phase = "limits"
@@ -178,30 +191,43 @@ class SimpleAutoCalibrator:
         
         # Get largest contour (assumed to be ball)
         largest = max(contours, key=cv2.contourArea)
-        ((x, y), radius) = cv2.minEnclosingCircle(largest)
+        ((x, y), radius) = cv2.minEnclosingCircle(largest) #x,y = ball's center coords
         
         # Filter out very small detections
         if radius < 5:
             return None
         
         # Convert pixel position to meters from center
-        center_x = frame.shape[1] // 2
-        pixel_offset = x - center_x
-        meters_offset = pixel_offset * self.pixel_to_meter_ratio
+        center_x, center_y = self.plate_center
+        pixel_offset_x = x - center_x
+        pixel_offset_y = y - center_y
+
+        # average the pixel_to_mean ratio of l1, l2, l3
+        self.pixel_to_meter_ratio = np.mean([
+            self.pixel_to_meter_ratio_l1,
+            self.pixel_to_meter_ratio_l2,
+            self.pixel_to_meter_ratio_l3
+        ])
+
+        meters_offset_x = pixel_offset_x * self.pixel_to_meter_ratio
+        meters_offset_y = -pixel_offset_y * self.pixel_to_meter_ratio #openCV's axis is inverted
         
-        return meters_offset
+        return meters_offset_x, meters_offset_y
 
     def find_limits_automatically(self):
         """Use servo motor to automatically find ball position limits."""
         if not self.servo:
             # Estimate limits without servo if connection failed
-            self.position_min = -self.BEAM_LENGTH_M / 2
-            self.position_max = self.BEAM_LENGTH_M / 2
+            # self.position_min = -self.SIDE_LENGTH_M / 2
+            # self.position_max = self.SIDE_LENGTH_M / 2
+            self.position_min = [None, None]  # [x_min, y_min]
+            self.position_max = [None, None]  # [x_max, y_max]
             print("[LIMITS] Estimated without servo")
             return
         
         print("[LIMITS] Finding limits with servo...")
-        positions = []
+        positions_x = []
+        positions_y = []
         
         # Test servo at different angles to find position range
         test_angles = [self.neutral_angle - 15, self.neutral_angle, self.neutral_angle + 15]
@@ -212,30 +238,43 @@ class SimpleAutoCalibrator:
             time.sleep(2)  # Wait for ball to settle
             
             # Collect multiple position measurements
-            angle_positions = []
+            angle_positions_x = []
+            angle_positions_y = []
             start_time = time.time()
             while time.time() - start_time < 1.0:
                 ret, frame = self.cap.read()
                 if ret:
-                    pos = self.detect_ball_position(frame)
-                    if pos is not None:
-                        angle_positions.append(pos)
+                    pos_x, pos_y = self.detect_ball_position(frame)
+                    if pos_x is not None and pos_y is not None:
+                        angle_positions_x.append(pos_x)
+                        angle_positions_y.append(pos_y)
                 time.sleep(0.05)
             
             # Calculate average position for this angle
-            if angle_positions:
-                avg_pos = np.mean(angle_positions)
-                positions.append(avg_pos)
-                print(f"[LIMITS] Angle {angle}: {avg_pos:.4f}m")
-        
+            if angle_positions_x:
+                avg_pos_x = np.mean(angle_positions_x)
+                positions_x.append(avg_pos_x)
+                print(f"[LIMITS X] Angle {angle}: {avg_pos_x:.4f}m")
+
+            # Calculate average position for this angle
+            if angle_positions_y:
+                avg_pos_y = np.mean(angle_positions_y)
+                positions_y.append(avg_pos_y)
+                print(f"[LIMITS Y] Angle {angle}: {avg_pos_y:.4f}m")
+
         # Return servo to neutral position
         self.send_servo_angle(self.neutral_angle)
         
         # Determine position limits from collected data
-        if len(positions) >= 2:
-            self.position_min = min(positions)
-            self.position_max = max(positions)
-            print(f"[LIMITS] Range: {self.position_min:.4f}m to {self.position_max:.4f}m")
+        if len(positions_x) >= 2 and len(positions_y) >= 2:
+            self.position_min[0] = min(positions_x)
+            self.position_max[0] = max(positions_x)
+            print(f"[LIMITS X] Range: {self.position_min[0]:.4f}m to {self.position_max[0]:.4f}m")
+
+            self.position_min[1] = min(positions_y)
+            self.position_max[1] = max(positions_y)
+            print(f"[LIMITS Y] Range: {self.position_min[1]:.4f}m to {self.position_max[1]:.4f}m")
+
         else:
             print("[LIMITS] Failed to find limits")
 
@@ -243,7 +282,7 @@ class SimpleAutoCalibrator:
         """Save all calibration results to config.json file."""
         config = {
             "timestamp": datetime.now().isoformat(),
-            "beam_length_m": float(self.BEAM_LENGTH_M),
+            "side_length_m": float(self.SIDE_LENGTH_M),
             "camera": {
                 "index": int(self.CAM_INDEX),
                 "frame_width": int(self.FRAME_W),
@@ -255,12 +294,18 @@ class SimpleAutoCalibrator:
             },
             "calibration": {
                 "pixel_to_meter_ratio": float(self.pixel_to_meter_ratio) if self.pixel_to_meter_ratio else None,
-                "position_min_m": float(self.position_min) if self.position_min else None,
-                "position_max_m": float(self.position_max) if self.position_max else None
+                "position_min_m_x": float(self.position_min[0]) if self.position_min[0] else None,
+                "position_min_m_y": float(self.position_min[1]) if self.position_min[1] else None,
+
+                "position_max_m_x": float(self.position_max[0]) if self.position_max[0] else None,
+                "position_max_m_y": float(self.position_max[1]) if self.position_max[1] else None
+
             },
             "servo": {
                 "port": str(self.servo_port),
-                "neutral_angle": int(self.neutral_angle)
+                "neutral_angle_1": int(self.neutral_angle[0]),
+                "neutral_angle_2": int(self.neutral_angle[1]),
+                "neutral_angle_3": int(self.neutral_angle[2])
             }
         }
         
@@ -283,7 +328,7 @@ class SimpleAutoCalibrator:
         # Phase-specific instruction text
         phase_text = {
             "color": "Click on ball to sample colors. Press 'c' when done.",
-            "geometry": "Click on beam endpoints (2 points)",
+            "geometry": "Click on platform endpoints (3 points)",
             "limits": "Press 'l' to find limits automatically",
             "complete": "Calibration complete! Press 's' to save"
         }
@@ -305,10 +350,11 @@ class SimpleAutoCalibrator:
             cv2.putText(overlay, f"Peg {i+1}", (peg[0]+10, peg[1]-10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
-        # Draw line between beam endpoints if both are selected
-        if len(self.peg_points) == 2:
+        # Draw line between platform endpoints if both are selected
+        if len(self.peg_points) == 3:
             cv2.line(overlay, self.peg_points[0], self.peg_points[1], (255, 0, 0), 2)
-        
+            cv2.line(overlay, self.peg_points[1], self.peg_points[2], (255, 0, 0), 2)
+            cv2.line(overlay, self.peg_points[2], self.peg_points[0], (255, 0, 0), 2)        
         # Show real-time ball detection if color calibration is complete
         if self.lower_hsv:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -332,18 +378,25 @@ class SimpleAutoCalibrator:
                     
                     # Show position if geometry calibration is complete
                     if self.pixel_to_meter_ratio:
-                        pos = self.detect_ball_position(frame)
-                        if pos is not None:
-                            cv2.putText(overlay, f"Pos: {pos:.4f}m",
+                        pos_x, pos_y = self.detect_ball_position(frame)
+                        if pos_x is not None and pos_y is not None:
+                            cv2.putText(overlay, f"X: {pos_x:.4f}m, Y: {pos_y:.4f}m",
                                        (int(x)+20, int(y)+20),
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        
+                            
         # Show final results if limit calibration is complete
-        if self.position_min is not None and self.position_max is not None:
-            cv2.putText(overlay, f"Limits: {self.position_min:.4f}m to {self.position_max:.4f}m",
-                       (10, overlay.shape[0] - 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        
+        if (self.position_min[0] is not None and self.position_max[0] is not None
+            and self.position_min[1] is not None and self.position_max[1] is not None):
+
+            cv2.putText(overlay,
+                        f"X Limits: {self.position_min[0]:.4f}m to {self.position_max[0]:.4f}m",
+                        (10, overlay.shape[0] - 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+            cv2.putText(overlay,
+                        f"Y Limits: {self.position_min[1]:.4f}m to {self.position_max[1]:.4f}m",
+                        (10, overlay.shape[0] - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         return overlay
 
     def run(self):
