@@ -1,56 +1,50 @@
-#include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
 
-// Servo configuration
-Servo beamServo;
-const int servoPin = 9;
-const int MIN_ANGLE = 5;
-const int MAX_ANGLE = 25;
-const int NEUTRAL_ANGLE = 15;
+// initalization
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+#define SERVOMIN 102
+#define SERVOMAX 512
 
-// Communication variables
-int targetAngle = NEUTRAL_ANGLE;
-bool newCommand = false;
+const int max_tick = SERVOMAX - 10;
+const int min_tick = SERVOMAX - 150;
+const int neutral_tick = SERVOMAX - 80;
 
-void setup() {
-  // Initialize serial communication
+int targetTick = neutral_tick;
+int targetChannel = 0;
+bool newCommand = false; 
+
+void setup(){
   Serial.begin(9600);
-  
-  // Attach servo
-  beamServo.attach(servoPin);
-  
-  // Move to neutral position
-  beamServo.write(NEUTRAL_ANGLE);
-  
-  // Initialize variables
-  targetAngle = NEUTRAL_ANGLE;
-  
-  // Optional: Send ready message
-  Serial.println("Arduino servo controller ready");
+  pwm.begin();
+
+  // 50Hz
+  pwm.setPWMFreq(50);
+  delay(10);
 }
 
-void loop() {
-  // Check for incoming serial data
-  if (Serial.available() > 0) {
-    // Read the incoming byte
-    int receivedAngle = Serial.read();
-    
-    // Validate angle range
-    if (receivedAngle >= MIN_ANGLE && receivedAngle <= MAX_ANGLE) {
-      targetAngle = receivedAngle;
+void loop(){
+  // check for incoming serial data 
+  if(Serial.available() >=3 ){
+    int highByte = Serial.read();
+    int lowByte = Serial.read();
+    int channel = Serial.read();
+
+    int tick = (highByte << 8) | lowByte;
+    // Validate channel 
+    // Validate tick range
+    if(tick and channel){ // 30 deg is the offset of motor1
+      targetTick = tick;
+      targetChannel = channel;
       newCommand = true;
-    }
   }
-  
-  // Update servo if new command received
-  if (newCommand) {
-    beamServo.write(targetAngle);
+  // Update servo if new command received 
+  if(newCommand){
+    //targetPwmTick = ( (targetAngle - SERVOMIN)/(SERVOMAX-SERVOMIN) ) * 180;
+    pwm.setPWM(targetChannel, 0, targetTick);
     newCommand = false;
-    
-    // Optional: Echo back the angle for debugging
-    Serial.print("Angle set to: ");
-    Serial.println(targetAngle);
   }
-  
-  // Small delay for stability
-  delay(10);
+  // max: [SERVOMAX-180, SERVOMAX-150, SERVOMAX-150]
+  // neutral: [SERVOMAX-110, SERVOMAX-80, SERVOMAX-80]
+  // min: [SERVOMAX-40, SERVOMAX-10, SERVOMAX-10]
 }
