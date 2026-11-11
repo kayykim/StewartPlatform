@@ -1,9 +1,9 @@
 """Two-axis PID and inverse kinematics for a 3-DOF ball-balancing platform.
 
 The inverse-kinematics equations follow the three actuator-plane model in
-StewartPlatform_Slides.pdf (S. Bedi, 2025). Hardware transmission is deliberately
-left disabled: the supplied project only defines a single-servo serial protocol,
-not the three-motor command protocol required by this mechanism.
+StewartPlatform_Slides.pdf (S. Bedi, 2025). The three motor angles are converted
+to servo angles and sent to servo_controller.ino over serial as a 4-byte packet:
+[0xFF][servo1][servo2][servo3].
 """
 
 import json
@@ -18,6 +18,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageTk
 
+try:
+    import serial  # pip install pyserial
+except ImportError:  # Controller still runs (PID + IK only) without pyserial.
+    serial = None
+
 from ball_detection import detect_ball_x
 
 
@@ -29,6 +34,7 @@ class BasicPIDController:
     # The slides label actuator 1 at 90 deg, actuator 2 at 330 deg,
     # and actuator 3 at 210 deg. This maps [actuator 1, 2, 3] to point indices.
     ACTUATOR_POINT_INDICES = (0, 2, 1)
+    SERIAL_HEADER = 0xFF  # Must match PACKET_HEADER in servo_controller.ino.
 
     def __init__(self, config_file="config.json"):
         with open(config_file, "r", encoding="utf-8") as config_stream:
@@ -57,6 +63,27 @@ class BasicPIDController:
         self.kinematics_config = self.config.get("kinematics", {})
         self.kinematics_ready = self._validate_kinematics_config()
 
+        serial_config = self.config.get("serial", {})
+        self.serial_port_name = serial_config.get("port")
+        self.serial_baud = int(serial_config.get("baud", 115200))
+        self.serial_enabled = bool(serial_config.get("enabled", self.serial_port_name is not None))
+        self.serial_port = None
+        self.serial_lock = threading.Lock()
+
+        servo_config = self.config.get("servo", {})
+        self.servo_neutral = self._servo_triplet(servo_config, "neutral_deg", 15.0)
+        self.servo_direction = self._servo_triplet(servo_config, "direction", 1.0)
+        self.servo_min = self._servo_triplet(servo_config, "min_deg", 5.0)
+        self.servo_max = self._servo_triplet(servo_config, "max_deg", 25.0)
+        if np.any(self.servo_min < 0) or np.any(self.servo_max > 180):
+            raise ValueError("servo min_deg/max_deg must lie within 0..180")
+        if np.any(self.servo_min > self.servo_neutral) or np.any(self.servo_neutral > self.servo_max):
+            raise ValueError("servo neutral_deg must lie between min_deg and max_deg")
+        if not np.all(np.isin(self.servo_direction, (-1.0, 1.0))):
+            raise ValueError("servo direction entries must each be 1 or -1")
+        self.level_motor_angles = self._compute_level_motor_angles()
+        self.last_limit_warning = 0.0
+
         self.integral = np.zeros(2, dtype=float)
         self.prev_error = np.zeros(2, dtype=float)
         self.last_pid_time = None
@@ -66,6 +93,7 @@ class BasicPIDController:
         self.control_log = []
         self.point_log = []
         self.actuator_log = []
+        self.servo_log = []
         self.start_time = None
         self.position_queue = queue.Queue(maxsize=1)
         self.running = False
@@ -100,6 +128,100 @@ class BasicPIDController:
         if int(cfg.get("ik_branch", 1)) not in (-1, 1):
             raise ValueError("kinematics.ik_branch must be either -1 or 1")
         return True
+
+    @staticmethod
+    def _servo_triplet(servo_config, key, default):
+        """Read a per-servo setting: a list of three numbers, or one number for all."""
+        value = servo_config.get(key, default)
+        array = np.asarray(value, dtype=float)
+        if array.ndim == 0:
+            array = np.full(3, float(array))
+        if array.shape != (3,) or not np.all(np.isfinite(array)):
+            raise ValueError(f"servo.{key} must be one number or three finite numbers")
+        return array
+
+    def _compute_level_motor_angles(self):
+        """Motor angles when the plate is level; these map to the servo neutral angles."""
+        if not self.kinematics_ready:
+            return None
+        try:
+            level_points = self.calculate_platform_points([0.0, 0.0])
+            return self.calculate_actuator_angles(level_points)[:, 0]
+        except (ValueError, RuntimeError) as exc:
+            print(f"[SERVO] Cannot compute level pose, servo output disabled: {exc}")
+            return None
+
+    def motor_to_servo_angles(self, actuator_angles):
+        """Convert IK motor angles to servo angles, clamped to the safe servo range.
+
+        servo = neutral + direction * (motor - motor_at_level_plate)
+        Returns (servo_angles, was_clamped).
+        """
+        if self.level_motor_angles is None:
+            raise RuntimeError("Level-pose motor angles unavailable; check kinematics config")
+        motor = np.asarray(actuator_angles, dtype=float)[:, 0]
+        raw = self.servo_neutral + self.servo_direction * (motor - self.level_motor_angles)
+        clamped = np.clip(raw, self.servo_min, self.servo_max)
+        return clamped, bool(np.any(clamped != raw))
+
+    def connect_serial(self):
+        """Open the Arduino serial port and center the servos. Returns True on success."""
+        if not self.serial_enabled:
+            print("[SERIAL] Disabled; add config.serial.port to send commands to the Arduino")
+            return False
+        if serial is None:
+            print("[SERIAL] pyserial is not installed (pip install pyserial); hardware output disabled")
+            return False
+        if not self.serial_port_name:
+            print("[SERIAL] config.serial.port is not set; hardware output disabled")
+            return False
+        try:
+            self.serial_port = serial.Serial(
+                self.serial_port_name, self.serial_baud, timeout=0.1, write_timeout=0.1
+            )
+        except (serial.SerialException, OSError) as exc:
+            print(f"[SERIAL] Could not open {self.serial_port_name}: {exc}")
+            self.serial_port = None
+            return False
+
+        time.sleep(2.0)  # Most Arduinos auto-reset when the port opens.
+        greeting = self.serial_port.readline().decode("ascii", errors="ignore").strip()
+        self.serial_port.reset_input_buffer()
+        print(f"[SERIAL] Connected to {self.serial_port_name} @ {self.serial_baud}"
+              + (f" ({greeting})" if greeting else ""))
+        self.send_servo_angles(self.servo_neutral)
+        return True
+
+    def send_servo_angles(self, servo_angles):
+        """Send [0xFF, a1, a2, a3]. Returns True if the packet was written."""
+        angles = np.clip(np.round(np.asarray(servo_angles, dtype=float)), 0, 180).astype(int)
+        packet = bytes([self.SERIAL_HEADER, *angles.tolist()])
+        with self.serial_lock:
+            if self.serial_port is None:
+                return False
+            try:
+                self.serial_port.write(packet)
+                return True
+            except (serial.SerialException, OSError) as exc:
+                print(f"[SERIAL] Write failed ({exc}); hardware output disabled")
+                try:
+                    self.serial_port.close()
+                except Exception:
+                    pass
+                self.serial_port = None
+                return False
+
+    def shutdown_serial(self):
+        """Return the servos to neutral and close the port."""
+        if self.serial_port is None:
+            return
+        self.send_servo_angles(self.servo_neutral)
+        time.sleep(0.1)
+        with self.serial_lock:
+            if self.serial_port is not None:
+                self.serial_port.close()
+                self.serial_port = None
+        print("[SERIAL] Servos centered; port closed")
 
     def update_pid(self, position, dt=None):
         """Return [pitch_deg, roll_deg] from measured [x_m, y_m]."""
@@ -260,7 +382,7 @@ class BasicPIDController:
             cap.release()
 
     def control_thread(self):
-        """Calculate control and inverse kinematics; do not guess motor protocol."""
+        """Calculate PID, inverse kinematics, and send servo angles to the Arduino."""
         self.start_time = time.time()
         while self.running:
             try:
@@ -268,9 +390,15 @@ class BasicPIDController:
                 pitch_roll = self.update_pid(position)
                 points = None
                 actuator_angles = None
+                servo_angles = None
                 if self.kinematics_ready:
                     points = self.calculate_platform_points(pitch_roll)
                     actuator_angles = self.calculate_actuator_angles(points)
+                    servo_angles, clamped = self.motor_to_servo_angles(actuator_angles)
+                    if clamped and time.monotonic() - self.last_limit_warning > 1.0:
+                        print("[SERVO] Command exceeded servo limits and was clamped")
+                        self.last_limit_warning = time.monotonic()
+                    self.send_servo_angles(servo_angles)
 
                 elapsed = time.time() - self.start_time
                 self.time_log.append(elapsed)
@@ -280,6 +408,7 @@ class BasicPIDController:
                 if points is not None:
                     self.point_log.append(points.copy())
                     self.actuator_log.append(actuator_angles.copy())
+                    self.servo_log.append(servo_angles.copy())
 
                 print(
                     f"[PID] ball=({position[0]:+.4f}, {position[1]:+.4f}) m | "
@@ -293,6 +422,10 @@ class BasicPIDController:
                             f"({point[0]:+.4f}, {point[1]:+.4f}, {point[2]:+.4f}) m; "
                             f"motor={angles[0]:+.2f} deg, elbow={angles[1]:+.2f} deg"
                         )
+                    print(
+                        f"[SERVO] command: {servo_angles[0]:.1f}, "
+                        f"{servo_angles[1]:.1f}, {servo_angles[2]:.1f} deg"
+                    )
             except queue.Empty:
                 continue
             except (ValueError, RuntimeError) as exc:
@@ -400,8 +533,9 @@ class BasicPIDController:
 
     def run(self):
         print("[INFO] Starting 3-DOF ball-balancing controller")
-        print("[INFO] PID outputs are pitch and roll; actuator IK is calculated when dimensions are configured")
+        print("[INFO] PID -> pitch/roll -> IK -> servo angles -> Arduino (when serial is configured)")
         self.running = True
+        self.connect_serial()
         self.create_gui()
         self.camera_thread_handle = threading.Thread(target=self.camera_thread, daemon=True)
         self.control_thread_handle = threading.Thread(target=self.control_thread, daemon=True)
@@ -412,6 +546,7 @@ class BasicPIDController:
         for thread in (self.camera_thread_handle, self.control_thread_handle):
             if thread is not None:
                 thread.join(timeout=1.0)
+        self.shutdown_serial()
         print("[INFO] Controller stopped")
 
 
