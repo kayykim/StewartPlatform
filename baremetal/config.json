@@ -1,0 +1,10 @@
+{
+  "servo": {
+    "port": "/dev/cu.usbmodem21401",
+    "servo_min": 102,
+    "servo_max": 512,
+    "min_tick": [332, 362, 362],
+    "max_tick": [472, 502, 502],
+    "neutral_tick": [402, 432, 432]  
+  }
+}
