@@ -192,7 +192,7 @@ class BasicPIDController:
     def send_servo_angles(self, servo_angles):
         angles = np.clip(np.round(np.asarray(servo_angles, dtype=float)), 0, 180)
         ticks = (angles / 180.0 * (SERVOMAX - SERVOMIN) + SERVOMIN).astype(int)
-        packet = bytes(int(t).to_bytes(2, "big") for t in ticks)
+        packet = b"".join(int(t).to_bytes(2, "big") for t in ticks)
         with self.serial_lock:
             if self.serial_port is None:
                 return False
