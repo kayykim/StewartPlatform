@@ -24,12 +24,13 @@ except ImportError:  # Controller still runs (PID + IK only) without pyserial.
     serial = None
 
 from ball_detection import detect_ball_x
-
+SERVOMIN = 102
+SERVOMAX = 512
 
 class BasicPIDController:
     """Track a ball and calculate pitch/roll plus the three actuator joint pairs."""
 
-    PROCESSING_SIZE = (320, 240)
+    PROCESSING_SIZE = (640, 480)
     POINT_ANGLES_DEG = np.array([90.0, 210.0, 330.0])
     # The slides label actuator 1 at 90 deg, actuator 2 at 330 deg,
     # and actuator 3 at 210 deg. This maps [actuator 1, 2, 3] to point indices.
@@ -39,14 +40,14 @@ class BasicPIDController:
     def __init__(self, config_file="config.json"):
         with open(config_file, "r", encoding="utf-8") as config_stream:
             self.config = json.load(config_stream)
-
-        self.Kp = float(self.config.get("pid", {}).get("Kp", 10.0))
-        self.Ki = float(self.config.get("pid", {}).get("Ki", 0.0))
-        self.Kd = float(self.config.get("pid", {}).get("Kd", 0.0))
-        self.setpoint_x = float(self.config.get("pid", {}).get("setpoint_x_m", 0.0))
-        self.setpoint_y = float(self.config.get("pid", {}).get("setpoint_y_m", 0.0))
-        self.max_tilt_deg = float(self.config.get("pid", {}).get("max_tilt_deg", 15.0))
-        self.error_scale = float(self.config.get("pid", {}).get("error_scale", 100.0))
+        cal = self.config.get("calibration", {})
+        self.setpoint_x = float(cal.get("setpoint_x_m", 0.0))
+        self.setpoint_y = float(cal.get("setpoint_y_m", 0.0))
+        self.Kp = float(1.0)
+        self.Ki = float(0.0)
+        self.Kd = float(0.0)
+        self.max_tilt_deg = 5.0 #float(self.config.get("pid", {}).get("max_tilt_deg", 15.0))
+        self.error_scale = 100.0 #float(self.config.get("pid", {}).get("error_scale", 100.0))
 
         calibration = self.config.get("calibration", {})
         if "pixel_to_meter_ratio" not in calibration:
@@ -60,21 +61,27 @@ class BasicPIDController:
             self.pixel_to_meter_ratio * proc_h / 2.0,
         ])
 
-        self.kinematics_config = self.config.get("kinematics", {})
-        self.kinematics_ready = self._validate_kinematics_config()
+        #self.kinematics_config = self.config.get("kinematics", {})
+        self.platform_radius_m = float(0.14)
+        self.center_height_m = float(0.0936)
+        self.base_offsets_m = np.array([0.05, 0.05, 0.05])
+        self.upper_links_m = np.array([0.094, 0.094, 0.094])
+        self.lower_links_m = np.array([0.08004, 0.08004, 0.08004])
+        self.ik_branch = 1
+        self.motor_angle_limits_deg = [0,180]
+        self.kinematics_ready = True #self._validate_kinematics_config()
 
-        serial_config = self.config.get("serial", {})
+        serial_config = self.config.get("servo", {})
         self.serial_port_name = serial_config.get("port")
-        self.serial_baud = int(serial_config.get("baud", 115200))
-        self.serial_enabled = bool(serial_config.get("enabled", self.serial_port_name is not None))
+        self.serial_baud = 9600
+        self.serial_enabled = bool(self.serial_port_name is not None)
         self.serial_port = None
         self.serial_lock = threading.Lock()
 
-        servo_config = self.config.get("servo", {})
-        self.servo_neutral = self._servo_triplet(servo_config, "neutral_deg", 15.0)
-        self.servo_direction = self._servo_triplet(servo_config, "direction", 1.0)
-        self.servo_min = self._servo_triplet(servo_config, "min_deg", 5.0)
-        self.servo_max = self._servo_triplet(servo_config, "max_deg", 25.0)
+        self.servo_neutral = np.array([146.0, 161.0, 165.0])
+        self.servo_min = np.array([101.0, 114.0, 114.0])
+        self.servo_max = np.array([162.0, 176.0, 176.0])
+        self.servo_direction = np.array([-1.0, -1.0, -1.0])
         if np.any(self.servo_min < 0) or np.any(self.servo_max > 180):
             raise ValueError("servo min_deg/max_deg must lie within 0..180")
         if np.any(self.servo_min > self.servo_neutral) or np.any(self.servo_neutral > self.servo_max):
@@ -129,16 +136,6 @@ class BasicPIDController:
             raise ValueError("kinematics.ik_branch must be either -1 or 1")
         return True
 
-    @staticmethod
-    def _servo_triplet(servo_config, key, default):
-        """Read a per-servo setting: a list of three numbers, or one number for all."""
-        value = servo_config.get(key, default)
-        array = np.asarray(value, dtype=float)
-        if array.ndim == 0:
-            array = np.full(3, float(array))
-        if array.shape != (3,) or not np.all(np.isfinite(array)):
-            raise ValueError(f"servo.{key} must be one number or three finite numbers")
-        return array
 
     def _compute_level_motor_angles(self):
         """Motor angles when the plate is level; these map to the servo neutral angles."""
@@ -193,9 +190,9 @@ class BasicPIDController:
         return True
 
     def send_servo_angles(self, servo_angles):
-        """Send [0xFF, a1, a2, a3]. Returns True if the packet was written."""
-        angles = np.clip(np.round(np.asarray(servo_angles, dtype=float)), 0, 180).astype(int)
-        packet = bytes([self.SERIAL_HEADER, *angles.tolist()])
+        angles = np.clip(np.round(np.asarray(servo_angles, dtype=float)), 0, 180)
+        ticks = (angles / 180.0 * (SERVOMAX - SERVOMIN) + SERVOMIN).astype(int)
+        packet = bytes(int(t).to_bytes(2, "big") for t in ticks)
         with self.serial_lock:
             if self.serial_port is None:
                 return False
@@ -257,19 +254,19 @@ class BasicPIDController:
         Uses R = Ry(pitch) @ Rx(roll), with the local triangular vertices
         equally spaced at the specified angles and z=0 in the plate frame.
         """
-        if not self.kinematics_ready:
-            raise RuntimeError("Kinematics dimensions are missing from config.json")
+        #if not self.kinematics_ready:
+        #    raise RuntimeError("Kinematics dimensions are missing from config.json")
         pitch, roll = np.radians(np.asarray(pitch_roll_deg, dtype=float))
         cp, sp = np.cos(pitch), np.sin(pitch)
         cr, sr = np.cos(roll), np.sin(roll)
         rot_y = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
-        rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+        rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, sr], [0.0, -sr, cr]])
         rotation = rot_y @ rot_x
 
-        radius = float(self.kinematics_config["platform_radius_m"])
+        radius = float(self.platform_radius_m)
         theta = np.radians(self.POINT_ANGLES_DEG)
         local_points = np.column_stack((radius * np.cos(theta), radius * np.sin(theta), np.zeros(3)))
-        center = np.array([0.0, 0.0, float(self.kinematics_config["center_height_m"])])
+        center = np.array([0.0, 0.0, float(self.center_height_m)])
         return (rotation @ local_points.T).T + center
 
     @staticmethod
@@ -312,18 +309,17 @@ class BasicPIDController:
 
     def calculate_actuator_angles(self, platform_points):
         """Return actuator 1..3 [motor_angle, elbow_angle] using slide geometry."""
-        if not self.kinematics_ready:
-            raise RuntimeError("Kinematics dimensions are missing from config.json")
+        #if not self.kinematics_ready:
+        #    raise RuntimeError("Kinematics dimensions are missing from config.json")
         points = np.asarray(platform_points, dtype=float)
         if points.shape != (3, 3):
             raise ValueError("platform_points must have shape (3, 3)")
 
-        cfg = self.kinematics_config
-        offsets = np.asarray(cfg["base_offsets_m"], dtype=float)
-        upper = np.asarray(cfg["upper_links_m"], dtype=float)
-        lower = np.asarray(cfg["lower_links_m"], dtype=float)
-        branch = int(cfg.get("ik_branch", 1))
-        limits = cfg.get("motor_angle_limits_deg")
+        offsets = np.asarray(self.base_offsets_m, dtype=float)
+        upper = np.asarray(self.upper_links_m, dtype=float)
+        lower = np.asarray(self.lower_links_m, dtype=float)
+        branch = int(self.ik_branch)
+        limits = self.motor_angle_limits_deg
         results = []
         for actuator_index, point_index in enumerate(self.ACTUATOR_POINT_INDICES):
             point = points[point_index]

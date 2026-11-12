@@ -242,6 +242,9 @@ class SimpleAutoCalibrator:
         return meters_offset_x, meters_offset_y
 
     def save_config(self):
+            cx, cy = self.plate_center
+            setpoint_x = (cx - self.FRAME_W / 2.0) * self.pixel_to_meter_ratio
+            setpoint_y = -(cy - self.FRAME_H / 2.0) * self.pixel_to_meter_ratio   # flip y: up is positive
             """Save all calibration results to config.json file."""
             config = {
                 "timestamp": datetime.now().isoformat(),
@@ -255,8 +258,12 @@ class SimpleAutoCalibrator:
                     "lower_hsv": [float(x) for x in self.lower_hsv] if self.lower_hsv else None,
                     "upper_hsv": [float(x) for x in self.upper_hsv] if self.upper_hsv else None
                 },
+
+
                 "calibration": {
-                    "pixel_to_meter_ratio": float(self.pixel_to_meter_ratio) if self.pixel_to_meter_ratio else None,
+                    "pixel_to_meter_ratio": float(self.pixel_to_meter_ratio),
+                    "setpoint_x_m": float(setpoint_x),
+                    "setpoint_y_m": float(setpoint_y),
                     # "position_min_m_x": float(self.position_min[0]) if self.position_min[0] else None,
                     # "position_min_m_y": float(self.position_min[1]) if self.position_min[1] else None,
                     # "position_max_m_x": float(self.position_max[0]) if self.position_max[0] else None,
