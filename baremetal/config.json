@@ -5,6 +5,17 @@
     "servo_max": 512,
     "min_tick": [332, 362, 362],
     "max_tick": [472, 502, 502],
-    "neutral_tick": [402, 432, 432]  
-  }
+    "neutral_tick": [402, 432, 432],
+    "min_angle_deg": [101, 114, 114],
+    "max_angle_deg": [162, 176, 176],
+    "neutral_angle_deg": [146, 161, 165] 
+  },
+"kinematics": {
+    "platform_radius_m": 0.14,
+    "center_height_m": 0.0936,
+    "base_offsets_m": [0.05, 0.05, 0.05],
+    "upper_links_m": [0.094, 0.094, 0.094],
+    "lower_links_m": [0.08004, 0.08004, 0.08004],
+    "ik_branch": 1
+}
 }
