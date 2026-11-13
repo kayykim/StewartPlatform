@@ -50,8 +50,9 @@ class SimpleAutoCalibrator:
         # angles - safety margins and NA 
         self.SERVOMIN = 102
         self.SERVOMAX = 512
-
-        self.neutral_tick = [self.SERVOMAX-110, self.SERVOMAX-80, self.SERVOMAX-80]  # tested on servo_controller.ino
+#146.0, 161.0, 165.0
+#tick[i] = (angle[i]/180.0) * (SERVOMAX - SERVOMIN) + SERVOMIN)
+        self.neutral_tick = [434, 469, 478]  # tested on servo_controller.ino
         self.min_tick = [self.SERVOMAX-180, self.SERVOMAX-150, self.SERVOMAX-150]
         self.max_tick = [self.SERVOMAX-40, self.SERVOMAX-10, self.SERVOMAX-10]
 

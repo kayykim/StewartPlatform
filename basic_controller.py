@@ -36,17 +36,17 @@ class BasicPIDController:
     # and actuator 3 at 210 deg. This maps [actuator 1, 2, 3] to point indices.
     ACTUATOR_POINT_INDICES = (0, 2, 1)
     SERIAL_HEADER = 0xFF  # Must match PACKET_HEADER in servo_controller.ino.
-    AXIS_MAP = np.array([[0.0, -1.0], [-1.0, 0.0]])
+    AXIS_MAP = np.array([[0.0, 1.0], [1.0, 0.0]])
 
     def __init__(self, config_file="config.json"):
         with open(config_file, "r", encoding="utf-8") as config_stream:
             self.config = json.load(config_stream)
         cal = self.config.get("calibration", {})
-        self.setpoint_x = float(cal.get("setpoint_x_m", 0.0))
-        self.setpoint_y = float(cal.get("setpoint_y_m", 0.0))
-        self.Kp = float(1.0)
-        self.Ki = float(0.0)
-        self.Kd = float(0.0)
+        self.setpoint_x = float(cal.get("setpoint_x_m"))
+        self.setpoint_y = float(cal.get("setpoint_y_m"))
+        self.Kp = float(0.633)
+        self.Ki = float(0.063)
+        self.Kd = float(0.038)
         self.max_tilt_deg = 5.0 #float(self.config.get("pid", {}).get("max_tilt_deg", 15.0))
         self.error_scale = 100.0 #float(self.config.get("pid", {}).get("error_scale", 100.0))
 
@@ -446,15 +446,17 @@ class BasicPIDController:
         self.kd_var = tk.DoubleVar(value=self.Kd)
         self.setpoint_x_var = tk.DoubleVar(value=self.setpoint_x)
         self.setpoint_y_var = tk.DoubleVar(value=self.setpoint_y)
-
+        self.gain_text = {}
         for label, variable, low, high in (
-            ("Kp", self.kp_var, 0, 100),
-            ("Ki", self.ki_var, 0, 10),
-            ("Kd", self.kd_var, 0, 20),
+            ("Kp", self.kp_var, 0, 3),
+            ("Ki", self.ki_var, 0, 2),
+            ("Kd", self.kd_var, 0, 3),
         ):
-            ttk.Label(self.root, text=label, font=("Arial", 11)).pack()
+            text_var = tk.StringVar(value=f"{label}: {variable.get():.3f}")
+            self.gain_text[label] = (text_var, variable)
+            ttk.Label(self.root, textvariable=text_var, font=("Arial", 11)).pack()
             ttk.Scale(self.root, from_=low, to=high, variable=variable,
-                      orient=tk.HORIZONTAL, length=500).pack(pady=3)
+              orient=tk.HORIZONTAL, length=500).pack(pady=3)
 
         calibration = self.config["calibration"]
         x_min = float(calibration.get("position_min_m", -0.05))
@@ -490,6 +492,8 @@ class BasicPIDController:
         self.Kp = self.kp_var.get()
         self.Ki = self.ki_var.get()
         self.Kd = self.kd_var.get()
+        for name, (text_var, variable) in self.gain_text.items():
+            text_var.set(f"{name}: {variable.get():.3f}")
         self.setpoint_x = self.setpoint_x_var.get()
         self.setpoint_y = self.setpoint_y_var.get()
         self.root.after(50, self.update_gui)
