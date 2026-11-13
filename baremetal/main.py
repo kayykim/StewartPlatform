@@ -1,9 +1,10 @@
 # from ui import
-# from camera import
 # from pid import
 from serial_controller import connect_serial, disconnect_serial, send_ardunio_angle
 from kinematics import calculate_attachment_points, calculate_actuator_angles, convert_ik_to_servo_angles
+from camera import Camera
 import json
+import cv2
 
 class BasicPIDController():
     def __init__(self, config_file="config.json"):
@@ -63,7 +64,7 @@ class BasicPIDController():
         points = calculate_attachment_points(
             self.platform_radius, 
             self.center_height, 
-            tilt_x=0, tilt_y=-2
+            tilt_x=0, tilt_y=0 
         )
         ik_angles = calculate_actuator_angles(
             points, self.base_offsets, self.upper_links, self.lower_links
@@ -85,7 +86,39 @@ class BasicPIDController():
         print("[INFO] Controller stopped")
 
 if __name__ == "__main__":
+    controller = None
+    camera = None
+
     try:
+        # --- camera ---
+        camera = Camera()
+        cv2.namedWindow("Stewart Platform Camera")
+
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                camera.sample_color(x, y)
+
+        cv2.setMouseCallback("Stewart Platform Camera", mouse_callback)
+
+        while True:
+            frame = camera.get_frame()
+            camera.current_frame = frame
+
+            ball_position = camera.detect_ball(frame)
+
+            if ball_position is not None:
+                x, y, radius = ball_position
+
+                cv2.circle(frame, (x, y), radius, (0, 255, 0), 2)
+                cv2.circle(frame, (x, y), 3, (0, 255, 255), -1)
+                print("Ball Position:", (x, y))
+
+            cv2.imshow("Stewart Platform Camera", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        # --- controller ---
         controller = BasicPIDController()
         controller.start()
         input("Press Q to quit. ")
@@ -94,4 +127,8 @@ if __name__ == "__main__":
         print(f"[ERROR] {e}")
 
     finally:
-        controller.shutdown()
+        if camera is not None:
+            camera.release()
+        cv2.destroyAllWindows()
+        if controller is not None:
+            controller.shutdown()
