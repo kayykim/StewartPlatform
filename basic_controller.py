@@ -36,6 +36,7 @@ class BasicPIDController:
     # and actuator 3 at 210 deg. This maps [actuator 1, 2, 3] to point indices.
     ACTUATOR_POINT_INDICES = (0, 2, 1)
     SERIAL_HEADER = 0xFF  # Must match PACKET_HEADER in servo_controller.ino.
+    AXIS_MAP = np.array([[0.0, -1.0], [-1.0, 0.0]])
 
     def __init__(self, config_file="config.json"):
         with open(config_file, "r", encoding="utf-8") as config_stream:
@@ -383,7 +384,8 @@ class BasicPIDController:
         while self.running:
             try:
                 position = self.position_queue.get(timeout=0.1)
-                pitch_roll = self.update_pid(position)
+                pitch_roll = self.AXIS_MAP @ self.update_pid(position)
+                #pitch_roll = self.update_pid(position)
                 points = None
                 actuator_angles = None
                 servo_angles = None
