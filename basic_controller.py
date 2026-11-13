@@ -46,7 +46,7 @@ class BasicPIDController:
         self.setpoint_y = float(cal.get("setpoint_y_m"))
         self.Kp = float(0.633)
         self.Ki = float(0.063)
-        self.Kd = float(0.038)
+        self.Kd = float(0.380)
         self.max_tilt_deg = 5.0 #float(self.config.get("pid", {}).get("max_tilt_deg", 15.0))
         self.error_scale = 100.0 #float(self.config.get("pid", {}).get("error_scale", 100.0))
 
