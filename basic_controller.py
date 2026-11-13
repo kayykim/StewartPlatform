@@ -67,8 +67,8 @@ class BasicPIDController:
         self.base_offsets_m = np.array([0.05, 0.05, 0.05])
         self.upper_links_m = np.array([0.094, 0.094, 0.094])
         self.lower_links_m = np.array([0.08004, 0.08004, 0.08004])
-        self.ik_branch = 1
-        self.motor_angle_limits_deg = [0,180]
+        self.ik_branch = -1
+        self.motor_angle_limits_deg = [-180,180]
         self.kinematics_ready = True #self._validate_kinematics_config()
 
         serial_config = self.config.get("servo", {})
