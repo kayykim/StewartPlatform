@@ -95,6 +95,14 @@ class BasicPIDController:
         self.integral = np.zeros(2, dtype=float)
         self.prev_error = np.zeros(2, dtype=float)
         self.last_pid_time = None
+
+        # filtering/deadband
+        self.filtered_position = None
+        self.alpha = 0.5
+        self.deadband = 0.002
+        self.use_low_pass = False # change to True to use low pass
+        self.use_deadband = False # change to True to use deadband
+
         self.time_log = []
         self.position_log = []
         self.setpoint_log = []
@@ -111,6 +119,20 @@ class BasicPIDController:
         self.control_thread_handle = None
         self.root = None
 
+    # filtering / deadband
+    def filter_position(self, position):
+        if self.use_low_pass:
+            if self.filtered_position is None:
+                self.filtered_position = position.copy()
+            else:
+                self.filtered_position = (
+                    self.alpha * position
+                    + (1 - self.alpha) * self.filtered_position
+                )
+            return self.filtered_position.copy()
+
+        return position
+    
     def _validate_kinematics_config(self):
         """Check that physical dimensions required by the lecture model exist."""
         required = (
@@ -233,8 +255,15 @@ class BasicPIDController:
         self.last_pid_time = now
         dt = float(np.clip(dt, 0.001, 0.25))
 
+        # setpoint = np.array([self.setpoint_x, self.setpoint_y], dtype=float)
+        # error = (setpoint - position) * self.error_scale
+        position = self.filter_position(position)
         setpoint = np.array([self.setpoint_x, self.setpoint_y], dtype=float)
-        error = (setpoint - position) * self.error_scale
+        error = setpoint - position
+        if self.use_deadband:
+            error[np.abs(error) < self.deadband] = 0.0
+        error *= self.error_scale
+
         self.integral += error * dt
         # Basic anti-windup; output is also limited below.
         self.integral = np.clip(self.integral, -100.0, 100.0)
