@@ -36,7 +36,14 @@ class BasicPIDController:
     # and actuator 3 at 210 deg. This maps [actuator 1, 2, 3] to point indices.
     ACTUATOR_POINT_INDICES = (0, 2, 1)
     SERIAL_HEADER = 0xFF  # Must match PACKET_HEADER in servo_controller.ino.
-    AXIS_MAP = np.array([[0.0, 1.0], [1.0, 0.0]])
+    AXIS_MAP = np.array([[-1.0, 0.0], [0.0, 1.0]])
+
+    # Triangle path (Triangle button): three points on a circle of this radius around the setpoint.
+    TRIANGLE_RADIUS_M = 0.1                    # centre -> each corner (metres)
+    TRIANGLE_ANGLES_DEG = (90.0, 210.0, 330.0)   # corner directions: x right, y up (90 = top of the image)
+    TRIANGLE_MOVE_S = 3.0                        # time to glide from one point to the next
+    TRIANGLE_HOLD_S = 1.0                        # time to stay at each point
+    TRIANGLE_RETURN_TO_CENTER = True             # after the 3rd point, glide back to the setpoint
 
     def __init__(self, config_file="config.json"):
         with open(config_file, "r", encoding="utf-8") as config_stream:
@@ -96,12 +103,19 @@ class BasicPIDController:
         self.prev_error = np.zeros(2, dtype=float)
         self.last_pid_time = None
 
+        # Moving reference: the sliders set the centre (setpoint_x/y); a path moves ref_offset around it.
+        self.ref_offset = np.zeros(2, dtype=float)
+        self.path = None            # list of (move_s, start, end, hold_s) segments, or None
+        self.path_time = 0.0
+        self.path_last_tick = None
+        self.path_lock = threading.Lock()
+
         # filtering/deadband
         self.filtered_position = None
         self.alpha = 0.5
         self.deadband = 0.002
-        self.use_low_pass = False # change to True to use low pass
-        self.use_deadband = False # change to True to use deadband
+        self.use_low_pass = True # change to True to use low pass
+        self.use_deadband = True # change to True to use deadband
 
         self.time_log = []
         self.position_log = []
@@ -258,7 +272,7 @@ class BasicPIDController:
         # setpoint = np.array([self.setpoint_x, self.setpoint_y], dtype=float)
         # error = (setpoint - position) * self.error_scale
         position = self.filter_position(position)
-        setpoint = np.array([self.setpoint_x, self.setpoint_y], dtype=float)
+        setpoint = np.array([self.setpoint_x, self.setpoint_y], dtype=float) + self.ref_offset
         error = setpoint - position
         if self.use_deadband:
             error[np.abs(error) < self.deadband] = 0.0
@@ -271,6 +285,49 @@ class BasicPIDController:
         output = self.Kp * error + self.Ki * self.integral + self.Kd * derivative
         self.prev_error = error.copy()
         return np.clip(output, -self.max_tilt_deg, self.max_tilt_deg)
+
+    def start_triangle(self):
+        """Visit three points of a triangle centred on the setpoint, one after another."""
+        radius = self.TRIANGLE_RADIUS_M
+        corners = [radius * np.array([np.cos(a), np.sin(a)]) for a in np.radians(self.TRIANGLE_ANGLES_DEG)]
+        if self.TRIANGLE_RETURN_TO_CENTER:
+            corners.append(np.zeros(2))
+        segments = []
+        start = self.ref_offset.copy()
+        for corner in corners:
+            segments.append((self.TRIANGLE_MOVE_S, start, corner, self.TRIANGLE_HOLD_S))
+            start = corner
+        with self.path_lock:
+            self.path = segments
+            self.path_time = 0.0
+            self.path_last_tick = None
+        print(f"[PATH] Triangle started: {len(corners)} points, radius {radius * 1000:.0f} mm")
+
+    def advance_path(self):
+        """Move ref_offset along the active path. Called once per ball sample from the control thread,
+        so the path pauses while the ball is not detected."""
+        with self.path_lock:
+            if self.path is None:
+                return
+            now = time.monotonic()
+            dt = 0.0 if self.path_last_tick is None else min(now - self.path_last_tick, 0.25)
+            self.path_last_tick = now
+            self.path_time += dt
+            t = self.path_time
+            for move_s, start, end, hold_s in self.path:
+                if t < move_s:
+                    s = t / move_s
+                    blend = 10 * s**3 - 15 * s**4 + 6 * s**5   # smooth start/stop, no sudden setpoint jump
+                    self.ref_offset = start + blend * (end - start)
+                    return
+                t -= move_s
+                if t < hold_s:
+                    self.ref_offset = end.copy()
+                    return
+                t -= hold_s
+            self.ref_offset = self.path[-1][2].copy()
+            self.path = None
+            print("[PATH] Triangle finished")
 
     def reset_integral(self):
         self.integral[:] = 0.0
@@ -413,6 +470,7 @@ class BasicPIDController:
         while self.running:
             try:
                 position = self.position_queue.get(timeout=0.1)
+                self.advance_path()
                 pitch_roll = self.AXIS_MAP @ self.update_pid(position)
                 #pitch_roll = self.update_pid(position)
                 points = None
@@ -430,7 +488,7 @@ class BasicPIDController:
                 elapsed = time.time() - self.start_time
                 self.time_log.append(elapsed)
                 self.position_log.append(position.copy())
-                self.setpoint_log.append(np.array([self.setpoint_x, self.setpoint_y]))
+                self.setpoint_log.append(np.array([self.setpoint_x, self.setpoint_y]) + self.ref_offset)
                 self.control_log.append(pitch_roll.copy())
                 if points is not None:
                     self.point_log.append(points.copy())
@@ -502,6 +560,7 @@ class BasicPIDController:
         button_frame = ttk.Frame(self.root)
         button_frame.pack(pady=12)
         ttk.Button(button_frame, text="Reset PID", command=self.reset_integral).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Triangle", command=self.start_triangle).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=5)
         self.root.protocol("WM_DELETE_WINDOW", self.stop)
